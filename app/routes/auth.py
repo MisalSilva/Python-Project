@@ -123,7 +123,7 @@ def login():
 
 # Get access token using refresh token
 @bp.route("/auth/refresh", methods=["POST"])
-@jwt_required()
+@jwt_required(refresh=True)
 def refresh():
     """Endpoint to refresh token using refresh token in request header"""
     try:
@@ -131,14 +131,21 @@ def refresh():
         if not current_user_id:
             return error_response("Invalid token identity", 401)
 
-        new_access_token = create_access_token(identity=current_user_id)
+        # Get user to include role in new token
+        user = User.query.get(int(current_user_id))
+        if not user:
+            return error_response("User not found", 404)
 
-        return jsonify(
-            {
-                "token": new_access_token,
-                "access_token": new_access_token,
-            }
+        additional_claims = {'role': user.role}
+        new_access_token = create_access_token(
+            identity=current_user_id,
+            additional_claims=additional_claims
         )
+
+        return jsonify({
+            "token": new_access_token,
+            "access_token": new_access_token,
+        })
     except Exception as e:
         return error_response(f"Invalid token: {str(e)}", 401)
 
@@ -158,7 +165,7 @@ def logout():
 def get_profile():
     """Get authenticated user's profile"""
     current_user_id = get_jwt_identity()
-    user = User.query.get(current_user_id)
+    user = User.query.get(int(current_user_id))
 
     if not user:
         return error_response("User not found", 404)
@@ -167,9 +174,20 @@ def get_profile():
 
 
 @bp.route("/auth/verify", methods=["POST"])
+@jwt_required()
 def verify_token():
     """Verify if a token is valid and not expired"""
-    return jsonify({"message": "Token is valid", "verified": True})
+    current_user_id = get_jwt_identity()
+    user = User.query.get(int(current_user_id))
+    
+    if not user:
+        return error_response("User not found", 404)
+        
+    return jsonify({
+        "message": "Token is valid",
+        "verified": True,
+        "user": user.to_dict()
+    })
 
 
 @bp.route("/auth/change-password", methods=["POST"])
@@ -177,7 +195,7 @@ def verify_token():
 def change_password():
     """Endpoint to change a user's password"""
     current_user_id = get_jwt_identity()
-    user = User.query.get(current_user_id)
+    user = User.query.get(int(current_user_id))
 
     if not user:
         return error_response("User not found", 404)
@@ -196,9 +214,17 @@ def change_password():
     if not validate_password_complexity(data["new_password"]):
         return error_response("New password must meet complexity requirements", 400)
 
+    # Prevent password reuse
+    if user.check_password(data["new_password"]):
+        return error_response("New password must be different from current password", 400)
+
     # Update password
     user.password_hash = User.generate_password_hash(data["new_password"])
     db.session.commit()
+
+    # Revoke all existing tokens
+    jti = get_jwt()["jti"]
+    token_blocklist.add(jti)
 
     return jsonify({"message": "Password changed successfully"})
 
