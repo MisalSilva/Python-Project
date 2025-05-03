@@ -80,22 +80,45 @@ def create_app(test_config=None):
             # Convert back to int for database lookup
             user_id = int(identity)
             from app.models.user import User
-            return User.query.filter_by(id=user_id).one_or_none()
+            user = User.query.filter_by(id=user_id).one_or_none()
+            if not user:
+                return None
+            return user
         except (ValueError, TypeError):
             return None
     
     # Error handling
     @jwt.expired_token_loader
     def expired_token_callback(_jwt_header, jwt_payload):
-        return jsonify({"msg": "Token has expired"}), 401
+        return jsonify({
+            "msg": "Token has expired",
+            "error": "token_expired",
+            "message": "Please refresh your token or login again"
+        }), 401
     
     @jwt.invalid_token_loader
     def invalid_token_callback(error):
-        return jsonify({"msg": "Invalid token"}), 401
+        return jsonify({
+            "msg": "Invalid token",
+            "error": "invalid_token",
+            "message": "The provided token is invalid or malformed"
+        }), 401
     
     @jwt.unauthorized_loader
     def missing_token_callback(error):
-        return jsonify({"msg": "Authentication required"}), 401
+        return jsonify({
+            "msg": "Authentication required",
+            "error": "missing_token",
+            "message": "Please provide a valid authentication token"
+        }), 401
+    
+    @jwt.needs_fresh_token_loader
+    def token_not_fresh_callback(_jwt_header, jwt_payload):
+        return jsonify({
+            "msg": "Fresh token required",
+            "error": "fresh_token_required",
+            "message": "This operation requires a fresh token. Please login again."
+        }), 401
         
     # In testing mode, make token expiration predictable
     if app.config.get('TESTING'):
