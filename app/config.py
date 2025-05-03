@@ -3,12 +3,30 @@ from datetime import timedelta
 
 class Config:
     """Base configuration class for the application."""
-    SECRET_KEY = os.environ.get('SECRET_KEY', 'dev-secret-key')
+    # Security settings
+    SECRET_KEY = os.environ.get('SECRET_KEY', os.urandom(32).hex())
+    JWT_SECRET_KEY = os.environ.get('JWT_SECRET_KEY', os.urandom(32).hex())
+    
+    # Database settings
     SQLALCHEMY_DATABASE_URI = os.environ.get('SQLALCHEMY_DATABASE_URI', 'sqlite:///instance/bank.db')
     SQLALCHEMY_TRACK_MODIFICATIONS = False
-    JWT_SECRET_KEY = os.environ.get('JWT_SECRET_KEY', 'jwt-secret-key')
-    JWT_ACCESS_TOKEN_EXPIRES = timedelta(hours=1)
-    JWT_REFRESH_TOKEN_EXPIRES = timedelta(days=30)
+    
+    # JWT settings
+    JWT_ACCESS_TOKEN_EXPIRES = timedelta(minutes=15)  # Shorter access token lifetime
+    JWT_REFRESH_TOKEN_EXPIRES = timedelta(days=7)     # Shorter refresh token lifetime
+    JWT_TOKEN_LOCATION = ['headers']
+    JWT_HEADER_NAME = 'Authorization'
+    JWT_HEADER_TYPE = 'Bearer'
+    
+    # Session settings
+    SESSION_COOKIE_SECURE = True
+    SESSION_COOKIE_HTTPONLY = True
+    SESSION_COOKIE_SAMESITE = 'Lax'
+    
+    # Security settings
+    PASSWORD_SALT = os.environ.get('PASSWORD_SALT', os.urandom(32).hex())
+    
+    # Application settings
     DEBUG = False
     TESTING = False
 
