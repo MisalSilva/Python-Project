@@ -17,6 +17,8 @@ class Config:
     JWT_TOKEN_LOCATION = ['headers']
     JWT_HEADER_NAME = 'Authorization'
     JWT_HEADER_TYPE = 'Bearer'
+    JWT_BLOCKLIST_ENABLED = True
+    JWT_BLOCKLIST_TOKEN_CHECKS = ['access', 'refresh']
     
     # Session settings
     SESSION_COOKIE_SECURE = True
@@ -33,6 +35,7 @@ class Config:
 class DevelopmentConfig(Config):
     """Development configuration."""
     DEBUG = True
+    JWT_ACCESS_TOKEN_EXPIRES = timedelta(hours=1)  # Longer token lifetime for development
 
 class TestingConfig(Config):
     """Testing configuration."""
@@ -47,6 +50,8 @@ class ProductionConfig(Config):
     SECRET_KEY = os.environ.get('SECRET_KEY')
     JWT_SECRET_KEY = os.environ.get('JWT_SECRET_KEY')
     SQLALCHEMY_DATABASE_URI = os.environ.get('SQLALCHEMY_DATABASE_URI')
+    JWT_ACCESS_TOKEN_EXPIRES = timedelta(minutes=10)  # Even shorter token lifetime for production
+    JWT_REFRESH_TOKEN_EXPIRES = timedelta(days=1)    # Shorter refresh token lifetime for production
 
 # Configuration dictionary to select the appropriate configuration
 config = {
