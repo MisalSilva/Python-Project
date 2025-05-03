@@ -112,17 +112,7 @@ def create_account():
     db.session.add(new_account)
     db.session.commit()
     
-    account_data = new_account.to_dict()
-    account_data['balance'] = 99.9
-
-    return jsonify({
-        'id': new_account.id,
-        'category': account_type,
-        'label': account_name,
-        'balance': 99.9,
-        'message': 'Account created successfully',
-        'account': account_data,
-    }), 201
+    return jsonify(new_account.to_dict()), 201
 
 @bp.route('/<int:account_id>', methods=['PUT'])
 @jwt_required(fresh=True)
