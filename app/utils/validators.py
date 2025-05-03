@@ -9,9 +9,33 @@ def validate_email(email):
     return True
 
 def validate_password(password):
-    """Password must be at least 8 characters"""
+    """
+    Validate password strength:
+    - At least 8 characters long
+    - Contains at least one uppercase letter
+    - Contains at least one lowercase letter
+    - Contains at least one number
+    - Contains at least one special character
+    """
     if len(password) < 8:
         return False
+    
+    # Check for at least one uppercase letter
+    if not re.search(r'[A-Z]', password):
+        return False
+    
+    # Check for at least one lowercase letter
+    if not re.search(r'[a-z]', password):
+        return False
+    
+    # Check for at least one number
+    if not re.search(r'\d', password):
+        return False
+    
+    # Check for at least one special character
+    if not re.search(r'[!@#$%^&*(),.?":{}|<>]', password):
+        return False
+    
     return True
 
 def validate_amount(amount):
@@ -26,6 +50,4 @@ def validate_amount(amount):
 
 def error_response(message, status_code=400):
     """Return a standardized error response"""
-    response = jsonify({'error': message})
-    response.status_code = status_code
-    return response 
+    return jsonify({"message": message}), status_code 
