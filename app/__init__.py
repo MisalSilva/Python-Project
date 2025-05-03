@@ -111,8 +111,10 @@ def create_app(test_config=None):
         response.headers['X-Content-Type-Options'] = 'nosniff'
         response.headers['X-Frame-Options'] = 'DENY'
         response.headers['X-XSS-Protection'] = '1; mode=block'
-        response.headers['Content-Security-Policy'] = "default-src 'self'"
-        response.headers['Strict-Transport-Security'] = 'max-age=31536000; includeSubDomains'
+        response.headers['Content-Security-Policy'] = "default-src 'self'; script-src 'self' 'unsafe-inline' 'unsafe-eval'; style-src 'self' 'unsafe-inline';"
+        response.headers['Strict-Transport-Security'] = 'max-age=31536000; includeSubDomains; preload'
+        response.headers['Referrer-Policy'] = 'strict-origin-when-cross-origin'
+        response.headers['Permissions-Policy'] = 'geolocation=(), microphone=(), camera=()'
         
         return response
     
@@ -146,6 +148,14 @@ def create_app(test_config=None):
         if client_ip not in request_counts:
             request_counts[client_ip] = []
         request_counts[client_ip].append(current_time)
+
+    # Add CSRF protection
+    @app.before_request
+    def csrf_protect():
+        if request.method == "POST":
+            token = request.headers.get('X-CSRF-Token')
+            if not token or token != session.get('csrf_token'):
+                return jsonify({"error": "Invalid CSRF token"}), 403
 
     # Register models
     from app.models import user, account, transaction
