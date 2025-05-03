@@ -1,4 +1,4 @@
-from flask import Blueprint, request, jsonify
+from flask import Blueprint, request, jsonify, current_app, session
 from flask_jwt_extended import (
     create_access_token,
     create_refresh_token,
@@ -19,20 +19,40 @@ from app.utils.error_handlers import (
     ValidationError, AuthenticationError, ResourceNotFoundError,
     TokenError, DatabaseError
 )
+from sqlalchemy.exc import SQLAlchemyError, IntegrityError
+import json
 
 bp = Blueprint("auth", __name__, url_prefix="/api")
 
 @jwt.token_in_blocklist_loader
 def check_if_token_revoked(jwt_header, jwt_payload):
     """Callback function to check if a JWT exists in the database blocklist"""
-    jti = jwt_payload["jti"]
-    return TokenBlocklist.is_jti_revoked(jti)
+    try:
+        jti = jwt_payload.get("jti")
+        if not jti:
+            return True  # Consider tokens without JTI as revoked
+        return TokenBlocklist.is_jti_revoked(jti)
+    except Exception:
+        return True  # Consider tokens with errors as revoked
+
+def validate_json_request():
+    """Validate that the request contains valid JSON data"""
+    if not request.is_json:
+        raise ValidationError('Request must contain JSON data')
+    
+    try:
+        data = request.get_json()
+        if not data:
+            raise ValidationError('No data provided')
+        return data
+    except json.JSONDecodeError:
+        raise ValidationError('Invalid JSON data')
 
 @bp.route("/register", methods=["POST"])
 @bp.route("/auth/register", methods=["POST"])
 def register():
     try:
-        data = request.get_json()
+        data = validate_json_request()
         
         # Validate required fields
         required_fields = ['email', 'password', 'username', 'first_name', 'last_name']
@@ -92,12 +112,37 @@ def register():
         )
         new_user.set_password(data['password'])
         
-        db.session.add(new_user)
-        db.session.commit()
+        try:
+            db.session.add(new_user)
+            db.session.commit()
+        except IntegrityError:
+            db.session.rollback()
+            raise ValidationError('User with this email or username already exists')
+        except SQLAlchemyError as e:
+            db.session.rollback()
+            raise DatabaseError('Failed to create user account', details=str(e))
         
         # Create initial tokens
-        access_token = create_access_token(identity=new_user.id)
-        refresh_token = create_refresh_token(identity=new_user.id)
+        try:
+            access_token = create_access_token(
+                identity=new_user.id,
+                additional_claims={
+                    'role': new_user.role,
+                    'username': new_user.username,
+                    'email': new_user.email
+                },
+                fresh=True
+            )
+            refresh_token = create_refresh_token(
+                identity=new_user.id,
+                additional_claims={
+                    'role': new_user.role,
+                    'username': new_user.username,
+                    'email': new_user.email
+                }
+            )
+        except Exception as e:
+            raise TokenError('Failed to create authentication tokens', details=str(e))
         
         return jsonify({
             'message': 'Registration successful',
@@ -106,7 +151,7 @@ def register():
             'refresh_token': refresh_token
         }), 201
         
-    except ValidationError as e:
+    except (ValidationError, DatabaseError, TokenError) as e:
         raise e
     except Exception as e:
         raise DatabaseError('Failed to create user account', details=str(e))
@@ -115,10 +160,7 @@ def register():
 @bp.route("/auth/login", methods=["POST"])
 def login():
     try:
-        data = request.get_json()
-        
-        if not data:
-            raise ValidationError('No data provided')
+        data = validate_json_request()
         
         # Check if using email or username
         if "email" in data and "password" in data:
@@ -139,16 +181,19 @@ def login():
             'email': user.email
         }
         
-        # Create access token and refresh token
-        access_token = create_access_token(
-            identity=user.id,
-            additional_claims=additional_claims,
-            fresh=True
-        )
-        refresh_token = create_refresh_token(
-            identity=user.id,
-            additional_claims=additional_claims
-        )
+        try:
+            # Create access token and refresh token
+            access_token = create_access_token(
+                identity=user.id,
+                additional_claims=additional_claims,
+                fresh=True
+            )
+            refresh_token = create_refresh_token(
+                identity=user.id,
+                additional_claims=additional_claims
+            )
+        except Exception as e:
+            raise TokenError('Failed to create authentication tokens', details=str(e))
         
         return jsonify({
             'message': 'Login successful',
@@ -157,7 +202,7 @@ def login():
             'refresh_token': refresh_token
         })
         
-    except (ValidationError, AuthenticationError) as e:
+    except (ValidationError, AuthenticationError, TokenError) as e:
         raise e
     except Exception as e:
         raise DatabaseError('Login failed', details=str(e))
@@ -177,13 +222,16 @@ def refresh():
         # Get the current refresh token
         current_token = get_jwt()
         
-        # Revoke the current refresh token
-        TokenBlocklist.revoke_token(
-            jti=current_token['jti'],
-            expires_at=datetime.fromtimestamp(current_token['exp']),
-            token_type='refresh',
-            user_id=user.id
-        )
+        try:
+            # Revoke the current refresh token
+            TokenBlocklist.revoke_token(
+                jti=current_token['jti'],
+                expires_at=datetime.fromtimestamp(current_token['exp']),
+                token_type='refresh',
+                user_id=user.id
+            )
+        except Exception as e:
+            raise TokenError('Failed to revoke refresh token', details=str(e))
         
         # Create new tokens
         additional_claims = {
@@ -192,15 +240,18 @@ def refresh():
             'email': user.email
         }
         
-        new_access_token = create_access_token(
-            identity=current_user_id,
-            additional_claims=additional_claims,
-            fresh=True
-        )
-        new_refresh_token = create_refresh_token(
-            identity=current_user_id,
-            additional_claims=additional_claims
-        )
+        try:
+            new_access_token = create_access_token(
+                identity=current_user_id,
+                additional_claims=additional_claims,
+                fresh=True
+            )
+            new_refresh_token = create_refresh_token(
+                identity=current_user_id,
+                additional_claims=additional_claims
+            )
+        except Exception as e:
+            raise TokenError('Failed to create new tokens', details=str(e))
         
         return jsonify({
             'access_token': new_access_token,
@@ -220,34 +271,45 @@ def logout():
         current_token = get_jwt()
         user_id = get_jwt_identity()
         
-        # Add both access and refresh tokens to blocklist
-        TokenBlocklist.revoke_token(
-            jti=current_token['jti'],
-            expires_at=datetime.fromtimestamp(current_token['exp']),
-            token_type='access',
-            user_id=user_id
-        )
+        if not user_id:
+            raise TokenError('Invalid token identity')
         
-        # If there's a refresh token in the request, revoke it too
-        refresh_token = get_jwt_header().get('refresh_token')
-        if refresh_token:
+        try:
+            # Add both access and refresh tokens to blocklist
             TokenBlocklist.revoke_token(
-                jti=refresh_token['jti'],
-                expires_at=datetime.fromtimestamp(refresh_token['exp']),
-                token_type='refresh',
+                jti=current_token['jti'],
+                expires_at=datetime.fromtimestamp(current_token['exp']),
+                token_type='access',
                 user_id=user_id
             )
+            
+            # If there's a refresh token in the request, revoke it too
+            refresh_token = get_jwt_header().get('refresh_token')
+            if refresh_token:
+                TokenBlocklist.revoke_token(
+                    jti=refresh_token['jti'],
+                    expires_at=datetime.fromtimestamp(refresh_token['exp']),
+                    token_type='refresh',
+                    user_id=user_id
+                )
+        except Exception as e:
+            raise TokenError('Failed to revoke tokens', details=str(e))
         
         return jsonify({"message": "Successfully logged out"})
         
+    except TokenError as e:
+        raise e
     except Exception as e:
-        raise TokenError('Logout failed', details=str(e))
+        raise DatabaseError('Logout failed', details=str(e))
 
 @bp.route("/auth/profile", methods=["GET"])
 @jwt_required()
 def get_profile():
     try:
         current_user_id = get_jwt_identity()
+        if not current_user_id:
+            raise TokenError('Invalid token identity')
+            
         user = User.query.get(int(current_user_id))
         
         if not user:
@@ -255,7 +317,7 @@ def get_profile():
         
         return jsonify(user.to_dict())
         
-    except ResourceNotFoundError as e:
+    except (TokenError, ResourceNotFoundError) as e:
         raise e
     except Exception as e:
         raise DatabaseError('Failed to retrieve user profile', details=str(e))
@@ -265,6 +327,9 @@ def get_profile():
 def verify_token():
     try:
         current_user_id = get_jwt_identity()
+        if not current_user_id:
+            raise TokenError('Invalid token identity')
+            
         user = User.query.get(int(current_user_id))
         
         if not user:
@@ -273,6 +338,10 @@ def verify_token():
         # Get token information
         token = get_jwt()
         
+        # Verify token is not revoked
+        if TokenBlocklist.is_jti_revoked(token['jti']):
+            raise TokenError('Token has been revoked')
+        
         return jsonify({
             'message': 'Token is valid',
             'verified': True,
@@ -280,26 +349,34 @@ def verify_token():
             'token_info': {
                 'expires_at': datetime.fromtimestamp(token['exp']).isoformat(),
                 'token_type': token.get('type', 'access'),
-                'is_fresh': token.get('fresh', False)
+                'is_fresh': token.get('fresh', False),
+                'claims': {
+                    'role': token.get('role'),
+                    'username': token.get('username'),
+                    'email': token.get('email')
+                }
             }
         })
         
-    except ResourceNotFoundError as e:
+    except (TokenError, ResourceNotFoundError) as e:
         raise e
     except Exception as e:
-        raise TokenError('Token verification failed', details=str(e))
+        raise DatabaseError('Token verification failed', details=str(e))
 
 @bp.route("/auth/change-password", methods=["POST"])
 @jwt_required(fresh=True)
 def change_password():
     try:
         current_user_id = get_jwt_identity()
+        if not current_user_id:
+            raise TokenError('Invalid token identity')
+            
         user = User.query.get(int(current_user_id))
         
         if not user:
             raise ResourceNotFoundError('User not found')
         
-        data = request.get_json()
+        data = validate_json_request()
         
         # Validate required fields
         if not all(k in data for k in ("current_password", "new_password")):
@@ -320,22 +397,32 @@ def change_password():
         if user.check_password(data["new_password"]):
             raise ValidationError('New password must be different from current password')
         
-        # Update password
-        user.set_password(data["new_password"])
-        db.session.commit()
+        try:
+            # Update password
+            user.set_password(data["new_password"])
+            db.session.commit()
+        except SQLAlchemyError as e:
+            db.session.rollback()
+            raise DatabaseError('Failed to update password', details=str(e))
         
-        # Revoke all existing tokens
-        current_token = get_jwt()
-        TokenBlocklist.revoke_token(
-            jti=current_token['jti'],
-            expires_at=datetime.fromtimestamp(current_token['exp']),
-            token_type='access',
-            user_id=user.id
-        )
+        try:
+            # Revoke all existing tokens
+            current_token = get_jwt()
+            TokenBlocklist.revoke_token(
+                jti=current_token['jti'],
+                expires_at=datetime.fromtimestamp(current_token['exp']),
+                token_type='access',
+                user_id=user.id
+            )
+            
+            # Revoke all other tokens for this user
+            TokenBlocklist.revoke_all_user_tokens(user.id)
+        except Exception as e:
+            raise TokenError('Failed to revoke tokens', details=str(e))
         
         return jsonify({"message": "Password changed successfully"})
         
-    except (ValidationError, AuthenticationError, ResourceNotFoundError) as e:
+    except (ValidationError, AuthenticationError, ResourceNotFoundError, TokenError) as e:
         raise e
     except Exception as e:
         raise DatabaseError('Password change failed', details=str(e))
