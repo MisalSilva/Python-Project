@@ -1,5 +1,5 @@
 import os
-from flask import Flask, jsonify, request, Response
+from flask import Flask, jsonify, request, Response, session
 from flask_sqlalchemy import SQLAlchemy
 from flask_jwt_extended import JWTManager
 from flask_bcrypt import Bcrypt
@@ -10,6 +10,8 @@ import time
 from app.config import Config
 from app.utils.error_handlers import register_error_handlers
 from datetime import datetime
+from werkzeug.exceptions import HTTPException
+import secrets
 
 # Load environment variables
 load_dotenv()
@@ -31,7 +33,7 @@ def create_app(config_class=Config):
     app = Flask(__name__, instance_relative_config=True)
 
     # Enable CORS for all routes
-    CORS(app)
+    CORS(app, supports_credentials=True)
 
     # Initialize Swagger for API documentation
     swagger = Swagger(app, template_file=os.path.join(os.path.dirname(__file__), 'swagger.yaml'))
@@ -53,25 +55,29 @@ def create_app(config_class=Config):
     # Configure JWT handling
     @jwt.user_identity_loader
     def user_identity_lookup(identity):
-        return str(identity)
+        try:
+            return str(identity)
+        except Exception:
+            return None
     
     @jwt.user_lookup_loader
     def user_lookup_callback(_jwt_header, jwt_data):
-        identity = jwt_data["sub"]
         try:
+            identity = jwt_data.get("sub")
+            if not identity:
+                return None
+                
             user_id = int(identity)
             from app.models.user import User
             user = User.query.filter_by(id=user_id).one_or_none()
-            if not user:
-                return None
             return user
-        except (ValueError, TypeError):
+        except (ValueError, TypeError, Exception):
             return None
     
     # JWT Error Handlers
     @jwt.expired_token_loader
     def expired_token_callback(jwt_header, jwt_payload):
-        return {
+        return jsonify({
             'error': True,
             'message': 'Token has expired',
             'error_code': 'TOKEN_EXPIRED',
@@ -81,33 +87,33 @@ def create_app(config_class=Config):
                 'expired_at': jwt_payload.get('exp'),
                 'current_time': int(time.time())
             }
-        }, 401
+        }), 401
     
     @jwt.invalid_token_loader
     def invalid_token_callback(error):
-        return {
+        return jsonify({
             'error': True,
             'message': 'Invalid token',
             'error_code': 'INVALID_TOKEN',
             'status_code': 401,
             'timestamp': datetime.utcnow().isoformat(),
             'details': str(error)
-        }, 401
+        }), 401
     
     @jwt.unauthorized_loader
     def missing_token_callback(error):
-        return {
+        return jsonify({
             'error': True,
             'message': 'Missing token',
             'error_code': 'MISSING_TOKEN',
             'status_code': 401,
             'timestamp': datetime.utcnow().isoformat(),
             'details': str(error)
-        }, 401
+        }), 401
     
     @jwt.needs_fresh_token_loader
     def token_not_fresh_callback(jwt_header, jwt_payload):
-        return {
+        return jsonify({
             'error': True,
             'message': 'Fresh token required',
             'error_code': 'FRESH_TOKEN_REQUIRED',
@@ -117,11 +123,11 @@ def create_app(config_class=Config):
                 'token_type': jwt_payload.get('type', 'unknown'),
                 'token_expiry': jwt_payload.get('exp')
             }
-        }, 401
+        }), 401
     
     @jwt.revoked_token_loader
     def revoked_token_callback(jwt_header, jwt_payload):
-        return {
+        return jsonify({
             'error': True,
             'message': 'Token has been revoked',
             'error_code': 'TOKEN_REVOKED',
@@ -131,8 +137,33 @@ def create_app(config_class=Config):
                 'token_id': jwt_payload.get('jti'),
                 'revoked_at': jwt_payload.get('revoked_at')
             }
-        }, 401
+        }), 401
     
+    # Global error handler
+    @app.errorhandler(Exception)
+    def handle_error(error):
+        if isinstance(error, HTTPException):
+            response = {
+                'error': True,
+                'message': error.description,
+                'error_code': error.name,
+                'status_code': error.code,
+                'timestamp': datetime.utcnow().isoformat()
+            }
+            return jsonify(response), error.code
+            
+        # Handle unexpected errors
+        response = {
+            'error': True,
+            'message': 'An unexpected error occurred',
+            'error_code': 'INTERNAL_SERVER_ERROR',
+            'status_code': 500,
+            'timestamp': datetime.utcnow().isoformat()
+        }
+        if app.debug:
+            response['details'] = str(error)
+        return jsonify(response), 500
+
     # In testing mode, make token expiration predictable
     if app.config.get('TESTING'):
         app.config['JWT_ACCESS_TOKEN_EXPIRES'] = 1  # 1 second for tests
@@ -178,7 +209,16 @@ def create_app(config_class=Config):
         
         # Check current request count
         if client_ip in request_counts and len(request_counts[client_ip]) >= RATE_LIMIT:
-            return jsonify({"error": "Too many requests, please try again later"}), 429
+            return jsonify({
+                'error': True,
+                'message': 'Too many requests, please try again later',
+                'error_code': 'RATE_LIMIT_EXCEEDED',
+                'status_code': 429,
+                'timestamp': datetime.utcnow().isoformat(),
+                'details': {
+                    'retry_after': RATE_LIMIT_WINDOW
+                }
+            }), 429
         
         # Add current request
         if client_ip not in request_counts:
@@ -188,10 +228,28 @@ def create_app(config_class=Config):
     # Add CSRF protection
     @app.before_request
     def csrf_protect():
-        if request.method == "POST":
+        # Skip CSRF check for GET requests and Swagger UI
+        if request.method == "GET" or request.path.startswith('/apidocs'):
+            return
+            
+        # Skip CSRF check in test mode
+        if app.config.get('TESTING'):
+            return
+            
+        if request.method in ["POST", "PUT", "DELETE", "PATCH"]:
+            # Generate CSRF token if not exists
+            if 'csrf_token' not in session:
+                session['csrf_token'] = secrets.token_hex(32)
+                
             token = request.headers.get('X-CSRF-Token')
             if not token or token != session.get('csrf_token'):
-                return jsonify({"error": "Invalid CSRF token"}), 403
+                return jsonify({
+                    'error': True,
+                    'message': 'Invalid CSRF token',
+                    'error_code': 'INVALID_CSRF_TOKEN',
+                    'status_code': 403,
+                    'timestamp': datetime.utcnow().isoformat()
+                }), 403
 
     # Register models
     from app.models import user, account, transaction
@@ -205,7 +263,11 @@ def create_app(config_class=Config):
     # Root endpoint for testing
     @app.route('/')
     def home():
-        return jsonify({"message": "Welcome to the Banking API"})
+        return jsonify({
+            'message': "Welcome to the Banking API",
+            'version': '1.0.0',
+            'status': 'operational'
+        })
 
     # CLI commands
     @app.cli.command('init-db')
