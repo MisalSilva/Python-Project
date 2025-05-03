@@ -7,6 +7,9 @@ from dotenv import load_dotenv
 from flasgger import Swagger
 from flask_cors import CORS
 import time
+from app.config import Config
+from app.utils.error_handlers import register_error_handlers
+from datetime import datetime
 
 # Load environment variables
 load_dotenv()
@@ -23,7 +26,7 @@ RATE_LIMIT = 15
 # Time window in seconds
 RATE_LIMIT_WINDOW = 60
 
-def create_app(test_config=None):
+def create_app(config_class=Config):
     # Create and configure the app
     app = Flask(__name__, instance_relative_config=True)
 
@@ -34,50 +37,28 @@ def create_app(test_config=None):
     swagger = Swagger(app, template_file=os.path.join(os.path.dirname(__file__), 'swagger.yaml'))
     
     # Default configuration
-    app.config.from_mapping(
-        SECRET_KEY=os.environ.get('SECRET_KEY', 'dev'),
-        #SQLALCHEMY_DATABASE_URI=os.environ.get('SQLALCHEMY_DATABASE_URI', 'sqlite:///instance/bank.db'),
-        SQLALCHEMY_DATABASE_URI=os.environ.get(
-            'SQLALCHEMY_DATABASE_URI',
-            f"sqlite:///{os.path.join(app.instance_path, 'bank.db')}"
-        ),
-        SQLALCHEMY_TRACK_MODIFICATIONS=False,
-        JWT_SECRET_KEY=os.environ.get('JWT_SECRET_KEY', 'jwt-secret-key'),
-        JWT_ACCESS_TOKEN_EXPIRES=3600,  # 1 hour
-    )
+    app.config.from_object(config_class)
     
     # Enable debug mode
     app.debug = True
-
-    if test_config is None:
-        # Load the instance config, if it exists, when not testing
-        app.config.from_pyfile('config.py', silent=True)
-    else:
-        # Load the test config if passed in
-        app.config.from_mapping(test_config)
-
-    # Ensure the instance folder exists
-    try:
-        os.makedirs(app.instance_path)
-    except OSError:
-        pass
 
     # Initialize extensions with app
     db.init_app(app)
     jwt.init_app(app)
     bcrypt.init_app(app)
     
+    # Register error handlers
+    register_error_handlers(app)
+
     # Configure JWT handling
     @jwt.user_identity_loader
     def user_identity_lookup(identity):
-        # Always convert identity to string for JWT
         return str(identity)
     
     @jwt.user_lookup_loader
     def user_lookup_callback(_jwt_header, jwt_data):
         identity = jwt_data["sub"]
         try:
-            # Convert back to int for database lookup
             user_id = int(identity)
             from app.models.user import User
             user = User.query.filter_by(id=user_id).one_or_none()
@@ -87,39 +68,71 @@ def create_app(test_config=None):
         except (ValueError, TypeError):
             return None
     
-    # Error handling
+    # JWT Error Handlers
     @jwt.expired_token_loader
-    def expired_token_callback(_jwt_header, jwt_payload):
-        return jsonify({
-            "msg": "Token has expired",
-            "error": "token_expired",
-            "message": "Please refresh your token or login again"
-        }), 401
+    def expired_token_callback(jwt_header, jwt_payload):
+        return {
+            'error': True,
+            'message': 'Token has expired',
+            'error_code': 'TOKEN_EXPIRED',
+            'status_code': 401,
+            'timestamp': datetime.utcnow().isoformat(),
+            'details': {
+                'expired_at': jwt_payload.get('exp'),
+                'current_time': int(time.time())
+            }
+        }, 401
     
     @jwt.invalid_token_loader
     def invalid_token_callback(error):
-        return jsonify({
-            "msg": "Invalid token",
-            "error": "invalid_token",
-            "message": "The provided token is invalid or malformed"
-        }), 401
+        return {
+            'error': True,
+            'message': 'Invalid token',
+            'error_code': 'INVALID_TOKEN',
+            'status_code': 401,
+            'timestamp': datetime.utcnow().isoformat(),
+            'details': str(error)
+        }, 401
     
     @jwt.unauthorized_loader
     def missing_token_callback(error):
-        return jsonify({
-            "msg": "Authentication required",
-            "error": "missing_token",
-            "message": "Please provide a valid authentication token"
-        }), 401
+        return {
+            'error': True,
+            'message': 'Missing token',
+            'error_code': 'MISSING_TOKEN',
+            'status_code': 401,
+            'timestamp': datetime.utcnow().isoformat(),
+            'details': str(error)
+        }, 401
     
     @jwt.needs_fresh_token_loader
-    def token_not_fresh_callback(_jwt_header, jwt_payload):
-        return jsonify({
-            "msg": "Fresh token required",
-            "error": "fresh_token_required",
-            "message": "This operation requires a fresh token. Please login again."
-        }), 401
-        
+    def token_not_fresh_callback(jwt_header, jwt_payload):
+        return {
+            'error': True,
+            'message': 'Fresh token required',
+            'error_code': 'FRESH_TOKEN_REQUIRED',
+            'status_code': 401,
+            'timestamp': datetime.utcnow().isoformat(),
+            'details': {
+                'token_type': jwt_payload.get('type', 'unknown'),
+                'token_expiry': jwt_payload.get('exp')
+            }
+        }, 401
+    
+    @jwt.revoked_token_loader
+    def revoked_token_callback(jwt_header, jwt_payload):
+        return {
+            'error': True,
+            'message': 'Token has been revoked',
+            'error_code': 'TOKEN_REVOKED',
+            'status_code': 401,
+            'timestamp': datetime.utcnow().isoformat(),
+            'details': {
+                'token_id': jwt_payload.get('jti'),
+                'revoked_at': jwt_payload.get('revoked_at')
+            }
+        }, 401
+    
     # In testing mode, make token expiration predictable
     if app.config.get('TESTING'):
         app.config['JWT_ACCESS_TOKEN_EXPIRES'] = 1  # 1 second for tests
